@@ -118,24 +118,12 @@ deploy-k8s:
 	@echo "Fetching CloudFormation outputs..."
 	$(eval SM_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`SecretsManagerRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	$(eval EFS_ID := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`EFSFileSystemId`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	@echo "Fetching secrets from Secrets Manager..."
-# 	$(eval GRAFANA_PASS := $(shell aws secretsmanager get-secret-value --secret-id GrafanaAdminPasswordSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval AZURE_CLIENT_ID := $(shell aws secretsmanager get-secret-value --secret-id AzureClientIdSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval AZURE_CLIENT_SECRET := $(shell aws secretsmanager get-secret-value --secret-id AzureClientSecretSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval AZURE_TENANT_ID := $(shell aws secretsmanager get-secret-value --secret-id AzureTenantIdSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval POSTGRES_PASS := $(shell aws secretsmanager get-secret-value --secret-id PostgresAdminPasswordSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval PGADMIN_EMAIL := $(shell aws secretsmanager get-secret-value --secret-id PgAdminEmailSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-# 	$(eval PGADMIN_PASS := $(shell aws secretsmanager get-secret-value --secret-id PgAdminPasswordSecret --query SecretString --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	@echo "Annotating CSI driver service account..."
 	kubectl annotate serviceaccount -n kube-system csi-secrets-store-provider-aws eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	@echo "Updating manifest with EFS ID: $(EFS_ID)"
 	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-secrets-manager-csi.yaml > k8s-secrets-manager-updated.yaml
 	@echo "Deploying Kubernetes manifests..."
 	kubectl apply -f k8s-secrets-manager-updated.yaml
-# 	@echo "Creating Kubernetes secrets..."
-# 	kubectl create secret generic grafana-secret --from-literal=admin-password=$(GRAFANA_PASS) --from-literal=azure-client-id=$(AZURE_CLIENT_ID) --from-literal=azure-client-secret=$(AZURE_CLIENT_SECRET) --from-literal=azure-tenant-id=$(AZURE_TENANT_ID) -n grafana-stack --dry-run=client -o yaml | kubectl apply -f -
-# 	kubectl create secret generic postgres-secret --from-literal=password=$(POSTGRES_PASS) -n postgres-stack --dry-run=client -o yaml | kubectl apply -f -
-# 	kubectl create secret generic pgadmin-secret --from-literal=email=$(PGADMIN_EMAIL) --from-literal=password=$(PGADMIN_PASS) -n pgadmin-stack --dry-run=client -o yaml | kubectl apply -f -
 	@echo "Waiting for Grafana ingress to be ready..."
 	@kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' ingress/grafana -n grafana-stack --timeout=300s
 	@echo "Getting Ingress value for ALB in ENV"
