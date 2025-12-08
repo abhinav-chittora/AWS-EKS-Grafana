@@ -1,0 +1,917 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EKS cluster with Grafana, PostgreSQL, and Historical Connect Data services
+
+Parameters:
+  CertificateArn:
+    Type: String
+    Description: ARN of the SSL certificate in ACM for grafana
+
+  GrafanaDomainName:
+    Type: String
+    Description: Domain name for Grafana access
+
+  AzureClientId:
+    Type: String
+    Description: Azure AD Application Client ID
+    NoEcho: true
+
+  AzureClientSecret:
+    Type: String
+    Description: Azure AD Application Client Secret
+    NoEcho: true
+
+  AzureTenantId:
+    Type: String
+    Description: Azure AD Tenant ID
+
+  GrafanaAdminPassword:
+    Type: String
+    Description: Admin password for Grafana
+    NoEcho: true
+
+  PostgresAdminPassword:
+    Type: String
+    Description: PostgreSQL admin user password
+    NoEcho: true
+
+  PgAdminEmail:
+    Type: String
+    Description: pgAdmin4 admin email
+
+  PgAdminPassword:
+    Type: String
+    Description: pgAdmin4 admin password
+    NoEcho: true
+
+  TagProject:
+    Type: String
+    Description: Default Tag for project
+
+  TagOwner:
+    Type: String
+    Description: Default Tag for owner
+
+  PublicRouteCidr:
+    Type: String
+    Description: CIDR block for public route (use 0.0.0.0/0 for full internet access)
+    Default: "0.0.0.0/0"
+
+Resources:
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-VPC"
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicSubnet1"
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicSubnet2"
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.11.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PrivateSubnet1"
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.12.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PrivateSubnet2"
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  # Public route required for EKS load balancers and NAT gateway functionality
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: !Ref PublicRouteCidr  # Required for EKS ALB and NAT gateway
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet2
+
+  # KMS Key for Encryption
+  EKSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS Key for EKS cluster encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+  
+  SecretManagerKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS Key for Secret Manager
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  # EKS Cluster
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSNodeGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: EKSPodIdentityAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:CreatePodIdentityAssociation
+                  - eks:DescribePodIdentityAssociation
+                  - eks:ListPodIdentityAssociations
+                  - eks:DeletePodIdentityAssociation
+                  - eks:UpdatePodIdentityAssociation
+                  - sts:AssumeRole
+                  - sts:TagSession
+                Resource: '*'
+
+  ClusterAutoscalerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmazonEKSClusterAutoscalerPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - autoscaling:DescribeAutoScalingGroups
+              - autoscaling:DescribeAutoScalingInstances
+              - autoscaling:DescribeLaunchConfigurations
+              - autoscaling:DescribeTags
+              - autoscaling:SetDesiredCapacity
+              - autoscaling:TerminateInstanceInAutoScalingGroup
+              - ec2:DescribeLaunchTemplateVersions
+            Resource: '*'
+
+  LoadBalancerControllerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmazonEKSLoadBalancerControllerPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: '*'
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+          - Effect: Allow
+            Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcPeeringConnections
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:GetCoipPoolUsage
+              - ec2:DescribeCoipPools
+              - ec2:GetSecurityGroupsForVpc
+              - ec2:DescribeIpamPools
+              - ec2:DescribeRouteTables
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:DescribeSSLPolicies
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:DescribeTags
+              - elasticloadbalancing:DescribeTrustStores
+              - elasticloadbalancing:DescribeListenerAttributes
+              - elasticloadbalancing:DescribeCapacityReservation
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - cognito-idp:DescribeUserPoolClient
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+              - iam:ListServerCertificates
+              - iam:GetServerCertificate
+              - waf-regional:GetWebACL
+              - waf-regional:GetWebACLForResource
+              - waf-regional:AssociateWebACL
+              - waf-regional:DisassociateWebACL
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - wafv2:AssociateWebACL
+              - wafv2:DisassociateWebACL
+              - shield:GetSubscriptionState
+              - shield:DescribeProtection
+              - shield:CreateProtection
+              - shield:DeleteProtection
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - ec2:CreateSecurityGroup
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+            Resource: arn:aws:ec2:*:*:security-group/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: CreateSecurityGroup
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+              - ec2:DeleteTags
+            Resource: arn:aws:ec2:*:*:security-group/*
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:DeleteSecurityGroup
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:CreateTargetGroup
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:CreateRule
+              - elasticloadbalancing:DeleteRule
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+            Resource:
+              - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+            Resource:
+              - arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:SetIpAddressType
+              - elasticloadbalancing:SetSecurityGroups
+              - elasticloadbalancing:SetSubnets
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:ModifyTargetGroup
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:DeleteTargetGroup
+              - elasticloadbalancing:ModifyListenerAttributes
+              - elasticloadbalancing:ModifyCapacityReservation
+              - elasticloadbalancing:ModifyIpPools
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:AddTags
+            Resource:
+              - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+            Condition:
+              StringEquals:
+                elasticloadbalancing:CreateAction:
+                  - CreateTargetGroup
+                  - CreateLoadBalancer
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:DeregisterTargets
+            Resource: arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:SetWebAcl
+              - elasticloadbalancing:ModifyListener
+              - elasticloadbalancing:AddListenerCertificates
+              - elasticloadbalancing:RemoveListenerCertificates
+              - elasticloadbalancing:ModifyRule
+              - elasticloadbalancing:SetRulePriorities
+            Resource: '*'
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub "${AWS::StackName}-cluster"
+      Version: "1.34"
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      UpgradePolicy:
+        SupportType: STANDARD
+      EncryptionConfig:
+        - Resources:
+            - secrets
+          Provider:
+            KeyArn: !GetAtt EKSKMSKey.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  EFSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-EFSCSIDriverRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy
+
+  VPCCNIRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-VPCCNIRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  EBSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-EBSCSIDriverRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+  
+  # cluster-autoscaler is installed as part of drivers
+  ClusterAutoscalerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ClusterAutoscalerRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - !Ref ClusterAutoscalerPolicy
+  
+  SecretsManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-SecretsManagerRole"
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "arn:aws:iam::${AWS::AccountId}:oidc-provider/${Issuer}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${Issuer}:aud": "sts.amazonaws.com"
+                    },
+                    "StringLike": {
+                      "${Issuer}:sub": [
+                        "system:serviceaccount:kube-system:csi-secrets-store-provider-aws",
+                        "system:serviceaccount:grafana-stack:secrets-store-sa",
+                        "system:serviceaccount:postgres-stack:secrets-store-sa",
+                        "system:serviceaccount:pgadmin-stack:secrets-store-sa"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          - Issuer: !Select [1, !Split ["//", !GetAtt EKSCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - kms:Decrypt
+                Resource:
+                  - !Ref PostgresAdminPasswordSecret
+                  - !Ref GrafanaAdminPasswordSecret
+                  - !Ref AzureClientIdSecret
+                  - !Ref AzureClientSecretSecret
+                  - !Ref PgAdminEmailSecret
+                  - !Ref PgAdminPasswordSecret
+                  - !Ref AzureTenantIdSecret
+                  - !Ref ALBDnsNameSecret
+                  - !GetAtt SecretManagerKMSKey.Arn
+
+  # EKS Addons to be installed by default
+  EKSPodIdentityAgentAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: eks-pod-identity-agent
+      AddonVersion: v1.3.10-eksbuild.1
+
+  EKSEBSAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSPodIdentityAgentAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: aws-ebs-csi-driver
+      AddonVersion: v1.53.0-eksbuild.1
+      PodIdentityAssociations:
+        - RoleArn: !GetAtt EBSCSIDriverRole.Arn
+          ServiceAccount: ebs-csi-controller-sa
+
+  EKSVPCCNIAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSPodIdentityAgentAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: vpc-cni
+      AddonVersion: v1.20.5-eksbuild.1
+      PodIdentityAssociations:
+        - RoleArn: !GetAtt VPCCNIRole.Arn
+          ServiceAccount: aws-node
+
+  EKSEFSAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSPodIdentityAgentAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: aws-efs-csi-driver
+      AddonVersion: v2.1.15-eksbuild.1
+      PodIdentityAssociations:
+        - RoleArn: !GetAtt EFSCSIDriverRole.Arn
+          ServiceAccount: efs-csi-controller-sa
+
+  EKSCoreDNSAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: coredns
+      AddonVersion: v1.12.4-eksbuild.1
+  
+  EKSNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub "${AWS::StackName}-nodegroup"
+      NodeRole: !GetAtt EKSNodeGroupRole.Arn
+      ForceUpdateEnabled: true
+      InstanceTypes:
+        - t3.medium
+      AmiType: BOTTLEROCKET_x86_64
+      CapacityType: ON_DEMAND
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 3
+        DesiredSize: 2
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        Project: !Ref TagProject
+        Owner: !Ref TagOwner
+      Labels:
+        Project: !Ref TagProject
+
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EKS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 151.189.180.250/32
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 151.189.180.250/32
+
+  # EFS for persistent storage
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      FileSystemTags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EFS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.0.0/16
+
+  # Secrets Manager
+  AzureClientIdSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Azure AD Client ID for Grafana
+      Name: AzureClientIdSecret
+      SecretString: !Ref AzureClientId
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  AzureClientSecretSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Azure AD Client Secret for Grafana
+      Name: AzureClientSecretSecret
+      SecretString: !Ref AzureClientSecret
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  AzureTenantIdSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Azure AD Tenant ID for Grafana
+      Name: AzureTenantIdSecret
+      SecretString: !Ref AzureTenantId
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  GrafanaAdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Grafana Admin Password
+      Name: GrafanaAdminPasswordSecret
+      SecretString: !Ref GrafanaAdminPassword
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  PostgresAdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: PostgreSQL admin user password
+      Name: PostgresAdminPasswordSecret
+      SecretString: !Ref PostgresAdminPassword
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  PgAdminEmailSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: pgAdmin4 admin email
+      Name: PgAdminEmailSecret
+      SecretString: !Ref PgAdminEmail
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  PgAdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: pgAdmin4 admin password
+      Name: PgAdminPasswordSecret
+      SecretString: !Ref PgAdminPassword
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+  ALBDnsNameSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ALB DNS name for Grafana root URL
+      Name: ALBDnsNameSecret
+      SecretString: !Sub "https://${GrafanaDomainName}"
+      KmsKeyId: !Ref SecretManagerKMSKey
+
+Outputs:
+  EKSClusterName:
+    Description: EKS Cluster Name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-EKSClusterName"
+
+  ClusterAutoscalerPolicyArn:
+    Description: Cluster Autoscaler IAM Policy ARN
+    Value: !Ref ClusterAutoscalerPolicy
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterAutoscalerPolicyArn"
+
+  LoadBalancerControllerPolicyArn:
+    Description: Load Balancer Controller IAM Policy ARN
+    Value: !Ref LoadBalancerControllerPolicy
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerControllerPolicyArn"
+
+  EFSCSIDriverRoleArn:
+    Description: EFS CSI Driver IAM Role ARN
+    Value: !GetAtt EFSCSIDriverRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EFSCSIDriverRoleArn"
+
+  VPCCNIRoleArn:
+    Description: VPC CNI IAM Role ARN
+    Value: !GetAtt VPCCNIRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCCNIRoleArn"
+
+  EBSCSIDriverRoleArn:
+    Description: EBS CSI Driver IAM Role ARN
+    Value: !GetAtt EBSCSIDriverRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EBSCSIDriverRoleArn"
+
+  ClusterAutoscalerRoleArn:
+    Description: Cluster Autoscaler IAM Role ARN
+    Value: !GetAtt ClusterAutoscalerRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterAutoscalerRoleArn"
+
+  SecretsManagerRoleArn:
+    Description: Secrets Manager IAM Role ARN
+    Value: !GetAtt SecretsManagerRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretsManagerRoleArn"
+
+  EKSClusterEndpoint:
+    Description: EKS Cluster Endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-EKSClusterEndpoint"
+
+  EKSClusterOIDCIssuerUrl:
+    Description: EKS Cluster OIDC Issuer URL
+    Value: !GetAtt EKSCluster.OpenIdConnectIssuerUrl
+    Export:
+      Name: !Sub "${AWS::StackName}-EKSClusterOIDCIssuerUrl"
+
+  EFSFileSystemId:
+    Description: EFS File System ID
+    Value: !Ref EFSFileSystem
+    Export:
+      Name: !Sub "${AWS::StackName}-EFSFileSystemId"
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+
+  PrivateSubnet1:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet1"
+
+  PrivateSubnet2:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet2"
