@@ -243,19 +243,17 @@ kubectl describe ingress grafana -n grafana-stack
 ## Network Architecture
 
 ```mermaid
-Internet
-    ↓
-Internet Gateway
-    ↓
-Public Subnets (2 AZs)
-    ├── NAT Gateway
-    └── ALB
-         ↓
-Private Subnets (2 AZs)
-    └── EKS Nodes
-         ├── Grafana
-         ├── PostgreSQL
-         └── pgAdmin
+graph LR
+    Internet[Internet] --> IGW[Internet Gateway]
+    IGW --> PublicSubnets[Public Subnets<br/>2 AZs]
+    PublicSubnets --> NAT[NAT Gateway]
+    PublicSubnets --> ALB[Application Load Balancer]
+    NAT --> PrivateSubnets[Private Subnets<br/>2 AZs]
+    ALB --> PrivateSubnets
+    PrivateSubnets --> EKS[EKS Nodes]
+    EKS --> Grafana[Grafana POD]
+    EKS --> PostgreSQL[PostgreSQL POD]
+    EKS --> pgAdmin[pgAdmin POD]
 ```
 
 ## File Structure
