@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:REGION:ACCOUNT_ID:certificate/CERTIFICATE_ID"
+  },
+  {
+    "ParameterKey": "GrafanaDomainName",
+    "ParameterValue": "grafana.example.com"
+  },
+  {
+    "ParameterKey": "AzureClientId",
+    "ParameterValue": "YOUR_AZURE_CLIENT_ID"
+  },
+  {
+    "ParameterKey": "AzureClientSecret",
+    "ParameterValue": "YOUR_AZURE_CLIENT_SECRET"
+  },
+  {
+    "ParameterKey": "AzureTenantId",
+    "ParameterValue": "YOUR_AZURE_TENANT_ID"
+  },
+  {
+    "ParameterKey": "GrafanaAdminPassword",
+    "ParameterValue": "YOUR_GRAFANA_ADMIN_PASSWORD"
+  },
+  {
+    "ParameterKey": "PostgresAdminPassword",
+    "ParameterValue": "YOUR_POSTGRES_ADMIN_PASSWORD"
+  },
+  {
+    "ParameterKey": "PgAdminEmail",
+    "ParameterValue": "admin@example.com"
+  },
+  {
+    "ParameterKey": "PgAdminPassword",
+    "ParameterValue": "YOUR_PGADMIN_PASSWORD"
+  },
+  {
+    "ParameterKey": "TagProject",
+    "ParameterValue": "YOUR_PROJECT_NAME"
+  },
+  {
+    "ParameterKey": "TagOwner",
+    "ParameterValue": "YOUR_NAME"
+  }
+]
