@@ -57,7 +57,7 @@ Deploys:
 
 - PostgreSQL database
 - Grafana with Azure AD SSO
-- pgAdmin interface
+- pgAdmin interface (disabled by default)
 
 ### Full Deployment (All Steps)
 
@@ -104,8 +104,9 @@ Required parameters in `parameters.json`:
 
 - **Version**: 1.34
 - **Node Type**: t3.medium (Bottlerocket)
-- **Scaling**: 1-3 nodes (auto-scaling enabled)
-- **Addons**: EBS CSI, EFS CSI, VPC CNI, CoreDNS, Pod Identity Agent
+- **Scaling**: 1-5 nodes (auto-scaling enabled)
+- **Addons**: EBS CSI, EFS CSI, VPC CNI, CoreDNS, Pod Identity Agent, Metrics Server
+- **Authentication**: API_AND_CONFIG_MAP mode (supports both EKS Access Entries and aws-auth ConfigMap)
 
 ### Grafana
 
@@ -127,6 +128,7 @@ Required parameters in `parameters.json`:
 
 - **Image**: dpage/pgadmin4:latest
 - **Access**: HTTPS via ALB (port 8080)
+- **Status**: Disabled by default (manifests available as .disabled files)
 
 ## Security
 
@@ -167,6 +169,7 @@ make outputs         # View stack outputs
 
 ```bash
 make update-eks      # Update EKS stack
+make update-k8s      # Update Kubernetes manifests with prune (removes disabled resources)
 ```
 
 ### Cleanup
@@ -177,6 +180,14 @@ make delete-drivers  # Remove drivers and controllers
 make delete-eks      # Delete CloudFormation stack
 make clean           # Full cleanup (all above)
 ```
+
+### Manifest Management
+
+```bash
+make update-k8s      # Update manifests with prune (removes disabled components)
+```
+
+The `update-k8s` target uses `kubectl apply --prune` to automatically remove resources that are disabled (e.g., pgAdmin components with .disabled extension).
 
 ## Accessing Applications
 
@@ -197,11 +208,12 @@ kubectl get ingress pgadmin -n pgadmin-stack
 - **Password**: From AWS Secrets Manager (GrafanaAdminPasswordSecret)
 - **SSO**: Azure AD authentication enabled
 
-### pgAdmin Login
+### pgAdmin Login (if enabled)
 
 - **URL**: https://[your-domain]:8080
 - **Email**: From AWS Secrets Manager (PgAdminEmailSecret)
 - **Password**: From AWS Secrets Manager (PgAdminPasswordSecret)
+- **Note**: pgAdmin is disabled by default. To enable, rename .disabled files in k8s-manifests/ and run `make update-k8s`
 
 ## Troubleshooting
 
@@ -263,8 +275,23 @@ graph LR
 ├── .gitignore                          # Git ignore rules
 ├── Makefile                            # Deployment automation
 ├── grafana-eks.yaml                    # CloudFormation template
-└── k8s-secrets-manager-csi.yaml        # Kubernetes manifests
-└── parameters.json                     # CloudFormation parameters
+├── parameters_template.json            # CloudFormation parameters template
+├── chittora-access.yaml               # EKS Access Entry for restricted users
+├── eks-admin-role.yaml                # Dedicated EKS admin role
+└── k8s-manifests/                      # Kubernetes manifests directory
+    ├── 01-namespaces.yaml             # Namespace definitions
+    ├── 02-secrets-provider-class.yaml # Secrets Store CSI configuration
+    ├── 03-service-accounts.yaml       # Service accounts with IRSA
+    ├── 04-storage-class.yaml          # EFS storage class
+    ├── 05-postgres-pvc.yaml           # PostgreSQL persistent volume
+    ├── 06-grafana-pvc.yaml            # Grafana persistent volume
+    ├── 07-postgres-deployment.yaml    # PostgreSQL deployment
+    ├── 08-postgres-service.yaml       # PostgreSQL service
+    ├── 09-grafana-deployment.yaml     # Grafana deployment
+    ├── 10-grafana-ingress.yaml        # Grafana ALB ingress
+    ├── 11-pgadmin-deployment.yaml.disabled  # pgAdmin deployment (disabled)
+    ├── 12-pgadmin-service.yaml.disabled     # pgAdmin service (disabled)
+    └── 13-pgadmin-ingress.yaml.disabled     # pgAdmin ingress (disabled)
 ```
 
 ## License
