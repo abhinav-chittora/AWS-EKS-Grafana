@@ -1,0 +1,25 @@
+# PgAdmin Ingress (DISABLED - Rename to .yaml to enable)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pgadmin
+  namespace: pgadmin-stack
+  finalizers: []
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:149050210537:certificate/ba4441ea-5598-4679-942b-4aaf49aa2499
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 8080}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '8080'
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: pgadmin
+            port:
+              number: 80

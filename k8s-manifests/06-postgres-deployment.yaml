@@ -1,0 +1,63 @@
+# Postgres Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: postgres-stack
+  labels:
+    app: postgres
+    name: postgres
+    tier: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      serviceAccountName: secrets-store-sa
+      automountServiceAccountToken: true
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      containers:
+      - name: postgres
+        image: postgres:17.6
+        resources:
+          limits:
+            memory: "500Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: amazon_connect
+        - name: POSTGRES_USER
+          value: admin
+        - name: POSTGRES_PASSWORD_FILE
+          value: /mnt/secrets-store/password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: secrets-store
+          mountPath: /mnt/secrets-store
+          readOnly: true
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: secrets-store
+        csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: postgres-secrets

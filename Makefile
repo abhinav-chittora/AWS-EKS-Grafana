@@ -43,7 +43,7 @@ update-eks:
 		--region $(AWS_REGION) \
 		--profile $(AWS_PROFILE)
 	@echo "Updating kubeconfig..."
-	aws eks update-kubeconfig --region $(AWS_REGION) --name $(CLUSTER_NAME) --profile $(AWS_PROFILE)
+	aws eks update-kubeconfig --alias grafana-eks --region $(AWS_REGION) --name $(CLUSTER_NAME) --profile $(AWS_PROFILE)
 	@echo "Restarting CNI pods to apply new configuration..."
 	kubectl delete pods -n kube-system -l k8s-app=aws-node
 	kubectl wait --for=condition=ready --timeout=300s pod -l k8s-app=aws-node -n kube-system
@@ -121,9 +121,9 @@ deploy-k8s:
 	@echo "Annotating CSI driver service account..."
 	kubectl annotate serviceaccount -n kube-system csi-secrets-store-provider-aws eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	@echo "Updating manifest with EFS ID: $(EFS_ID)"
-	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-secrets-manager-csi.yaml > k8s-secrets-manager-updated.yaml
+	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml > k8s-manifests/04-storage-class-updated.yaml
 	@echo "Deploying Kubernetes manifests..."
-	kubectl apply -f k8s-secrets-manager-updated.yaml
+	kubectl apply -f k8s-manifests/
 	@echo "Waiting for Grafana ingress to be ready..."
 	@kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' ingress/grafana -n grafana-stack --timeout=300s
 	@echo "Getting Ingress value for ALB in ENV"
@@ -133,8 +133,21 @@ deploy-k8s:
 	@echo "Getting Secret Manager Role Arn"
 	kubectl annotate serviceaccount -n grafana-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	kubectl annotate serviceaccount -n postgres-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
-	kubectl annotate serviceaccount -n pgadmin-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	kubectl wait --for=condition=available --timeout=300s deployment/grafana -n grafana-stack
+#	kubectl annotate serviceaccount -n pgadmin-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
+
+update-k8s:
+	@echo "Fetching CloudFormation outputs..."
+	$(eval SM_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`SecretsManagerRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	$(eval EFS_ID := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`EFSFileSystemId`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	@echo "Updating manifest with EFS ID: $(EFS_ID)"
+	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml > k8s-manifests/04-storage-class-updated.yaml
+	@echo "Updating Kubernetes manifests with prune..."
+	kubectl apply -f k8s-manifests/ --prune --all --prune-whitelist=core/v1/ConfigMap --prune-whitelist=core/v1/Secret --prune-whitelist=core/v1/Service --prune-whitelist=apps/v1/Deployment --prune-whitelist=networking.k8s.io/v1/Ingress --prune-whitelist=core/v1/PersistentVolumeClaim --prune-whitelist=storage.k8s.io/v1/StorageClass --prune-whitelist=secrets-store.csi.x-k8s.io/v1/SecretProviderClass
+	@echo "Annotating service accounts..."
+	kubectl annotate serviceaccount -n kube-system csi-secrets-store-provider-aws eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
+	kubectl annotate serviceaccount -n grafana-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
+	kubectl annotate serviceaccount -n postgres-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 
 
 delete-drivers:
@@ -170,21 +183,8 @@ delete-drivers:
 		--region $(AWS_REGION) || true
 
 delete-k8s:
-	@echo "Deleting Kubernetes resources..."
-	@echo "Deleting ingresses..."
-	kubectl delete ingress --all -n grafana-stack --ignore-not-found=true || true
-	kubectl delete ingress --all -n postgres-stack --ignore-not-found=true || true
-	kubectl delete ingress --all -n pgadmin-stack --ignore-not-found=true || true
-	@echo "Force deleting pods..."
-	kubectl delete pods --all --grace-period=0 --force -n grafana-stack --ignore-not-found=true 2>/dev/null || true
-	kubectl delete pods --all --grace-period=0 --force -n postgres-stack --ignore-not-found=true 2>/dev/null || true
-	kubectl delete pods --all --grace-period=0 --force -n pgadmin-stack --ignore-not-found=true 2>/dev/null || true
-	@echo "Removing namespace finalizers..."
-	kubectl patch ns grafana-stack -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-	kubectl patch ns postgres-stack -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-	kubectl patch ns pgadmin-stack -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
 	@echo "Deleting manifests..."
-	kubectl delete -f k8s-secrets-manager-updated.yaml --ignore-not-found=true 2>/dev/null || true
+	kubectl delete -f k8s-manifests/ --ignore-not-found=true 2>/dev/null || true
 
 delete-eks:
 	@echo "Deleting EKS CloudFormation stack..."
@@ -221,19 +221,8 @@ validate:
 		--profile $(AWS_PROFILE)
 
 
-update:
-	# 	@echo "Deleting existing nodegroup..."
-	# 	aws eks delete-nodegroup --cluster-name $(CLUSTER_NAME) --nodegroup-name $(STACK_NAME)-nodegroup --region $(AWS_REGION) --profile $(AWS_PROFILE) || true
-	# 	@echo "Waiting for nodegroup deletion..."
-	# 	aws eks wait nodegroup-deleted --cluster-name $(CLUSTER_NAME) --nodegroup-name $(STACK_NAME)-nodegroup --region $(AWS_REGION) --profile $(AWS_PROFILE) || true
-	@echo "Updating EKS CloudFormation stack..."
-	aws cloudformation deploy \
-		--template-file grafana-eks.yaml \
-		--stack-name $(STACK_NAME) \
-		--parameter-overrides file://$(PARAMETERS_FILE) \
-		--capabilities CAPABILITY_NAMED_IAM \
-		--region $(AWS_REGION) \
-		--profile $(AWS_PROFILE)
+update: update-eks install-drivers update-k8s
+	@echo "Updatd EKS Cluster..."
 
 # Full deployment workflow
 deploy: deploy-eks install-drivers deploy-k8s

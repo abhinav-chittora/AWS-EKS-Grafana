@@ -263,7 +263,8 @@ graph LR
 ├── .gitignore                          # Git ignore rules
 ├── Makefile                            # Deployment automation
 ├── grafana-eks.yaml                    # CloudFormation template
-└── k8s-secrets-manager-csi.yaml       # Kubernetes manifests
+└── k8s-secrets-manager-csi.yaml        # Kubernetes manifests
+└── parameters.json                     # CloudFormation parameters
 ```
 
 ## License

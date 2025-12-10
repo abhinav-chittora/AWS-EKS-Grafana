@@ -1,0 +1,56 @@
+# PgAdmin Deployment (DISABLED - Rename to .yaml to enable)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin
+  namespace: pgadmin-stack
+  labels:
+    app: pgadmin
+    name: pgadmin
+    tier: pgadmin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pgadmin
+  template:
+    metadata:
+      labels:
+        app: pgadmin
+    spec:
+      serviceAccountName: secrets-store-sa
+      automountServiceAccountToken: true
+      containers:
+      - name: pgadmin
+        image: dpage/pgadmin4:latest
+        resources:
+          limits:
+            memory: "500Mi"
+            cpu: "250m"
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+        ports:
+        - containerPort: 80
+        env:
+        - name: PGADMIN_DEFAULT_EMAIL
+          value: "$(cat /mnt/secrets-store/email)"
+        - name: PGADMIN_DEFAULT_PASSWORD
+          value: "$(cat /mnt/secrets-store/password)"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            export PGADMIN_DEFAULT_EMAIL=$(cat /mnt/secrets-store/email)
+            export PGADMIN_DEFAULT_PASSWORD=$(cat /mnt/secrets-store/password)
+            exec /entrypoint.sh
+        volumeMounts:
+        - name: secrets-store
+          mountPath: /mnt/secrets-store
+          readOnly: true
+      volumes:
+      - name: secrets-store
+        csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: pgadmin-secrets

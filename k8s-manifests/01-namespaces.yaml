@@ -1,0 +1,17 @@
+# Name Space Creation
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grafana-stack
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgres-stack
+---
+# PgAdmin Namespace (COMMENTED - Not deployed)
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: pgadmin-stack
