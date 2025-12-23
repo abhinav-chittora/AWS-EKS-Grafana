@@ -121,15 +121,15 @@ deploy-k8s:
 	@echo "Annotating CSI driver service account..."
 	kubectl annotate serviceaccount -n kube-system csi-secrets-store-provider-aws eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	@echo "Updating manifest with EFS ID: $(EFS_ID)"
-	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml > k8s-manifests/04-storage-class-updated.yaml
+	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml.template > k8s-manifests/04-storage-class-updated.yaml
 	@echo "Deploying Kubernetes manifests..."
 	kubectl apply -f k8s-manifests/
-	@echo "Waiting for Grafana ingress to be ready..."
-	@kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' ingress/grafana -n grafana-stack --timeout=300s
+	@echo "Waiting for consolidated ingress to be ready..."
+	@kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' ingress/consolidated-alb -n grafana-stack --timeout=300s
 	@echo "Getting Ingress value for ALB in ENV"
-	$(eval ALB_DNS := $(shell kubectl get ingress grafana -n grafana-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'))
+	$(eval ALB_DNS := $(shell kubectl get ingress consolidated-alb -n grafana-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'))
 	@echo "Setting ALB_DNS in ENV variable"
-	@kubectl set env deployment/grafana -n grafana-stack GF_SERVER_ROOT_URL=https://$(ALB_DNS)
+	@kubectl set env deployment/grafana -n grafana-stack GF_SERVER_ROOT_URL=https://$(ALB_DNS)/grafana/
 	@echo "Getting Secret Manager Role Arn"
 	kubectl annotate serviceaccount -n grafana-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	kubectl annotate serviceaccount -n postgres-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
@@ -141,9 +141,9 @@ update-k8s:
 	$(eval SM_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`SecretsManagerRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	$(eval EFS_ID := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`EFSFileSystemId`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	@echo "Updating manifest with EFS ID: $(EFS_ID)"
-	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml > k8s-manifests/04-storage-class-updated.yaml
-	@echo "Updating Kubernetes manifests with prune..."
-	kubectl apply -f k8s-manifests/ --prune --all --prune-whitelist=core/v1/ConfigMap --prune-whitelist=core/v1/Secret --prune-whitelist=core/v1/Service --prune-whitelist=apps/v1/Deployment --prune-whitelist=networking.k8s.io/v1/Ingress --prune-whitelist=core/v1/PersistentVolumeClaim --prune-whitelist=storage.k8s.io/v1/StorageClass --prune-whitelist=secrets-store.csi.x-k8s.io/v1/SecretProviderClass
+	sed 's/fs-xxxxxxxxx/$(EFS_ID)/g' k8s-manifests/04-storage-class.yaml.template > k8s-manifests/04-storage-class-updated.yaml
+	@echo "Updating Kubernetes manifests..."
+	kubectl apply -f k8s-manifests/
 	@echo "Annotating service accounts..."
 	kubectl annotate serviceaccount -n kube-system csi-secrets-store-provider-aws eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	kubectl annotate serviceaccount -n grafana-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
