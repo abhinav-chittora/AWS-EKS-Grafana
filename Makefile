@@ -44,11 +44,6 @@ update-eks:
 		--profile $(AWS_PROFILE)
 	@echo "Updating kubeconfig..."
 	aws eks update-kubeconfig --alias grafana-eks --region $(AWS_REGION) --name $(CLUSTER_NAME) --profile $(AWS_PROFILE)
-	@echo "Restarting CNI pods to apply new configuration..."
-	kubectl delete pods -n kube-system -l k8s-app=aws-node
-	@echo "Waiting for new CNI pods to start..."
-	sleep 10
-	kubectl wait --for=condition=ready --timeout=300s pod -l k8s-app=aws-node -n kube-system || true
 	
 install-drivers:
 	@echo "Associating OIDC provider with cluster"

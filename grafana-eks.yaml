@@ -74,14 +74,14 @@ Parameters:
   GrafanaDomainName:
     Type: String
     Description: Fully qualified domain name for Grafana access
-    AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?\.[a-zA-Z]{2,}$"
-    ConstraintDescription: Must be a valid domain name
+    AllowedPattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\\.[a-zA-Z]{2,}$"
+    ConstraintDescription: Must be a valid domain name (supports subdomains)
 
   PublicRouteCidr:
     Type: String
     Description: CIDR block for public internet access (required for ALB and NAT gateway)
     Default: "0.0.0.0/0"
-    AllowedPattern: "^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
     ConstraintDescription: Must be a valid CIDR block
 
   # Azure AD Integration
@@ -126,7 +126,7 @@ Parameters:
   PgAdminEmail:
     Type: String
     Description: Email address for pgAdmin4 administrator login
-    AllowedPattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    AllowedPattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
     ConstraintDescription: Must be a valid email address
 
   PgAdminPassword:
