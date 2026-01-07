@@ -1,60 +1,179 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: EKS cluster with Grafana, PostgreSQL, and Historical Connect Data services
+Description: Production-ready EKS cluster with Grafana (Azure AD SSO), PostgreSQL, and pgAdmin
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network & Security Configuration"
+        Parameters:
+          - CertificateArn
+          - GrafanaDomainName
+          - PublicRouteCidr
+      - Label:
+          default: "Azure AD Integration"
+        Parameters:
+          - AzureClientId
+          - AzureClientSecret
+          - AzureTenantId
+      - Label:
+          default: "Application Credentials"
+        Parameters:
+          - GrafanaAdminPassword
+          - PostgresAdminPassword
+          - PgAdminEmail
+          - PgAdminPassword
+      - Label:
+          default: "Infrastructure Configuration"
+        Parameters:
+          - StorageType
+          - AutoscalerType
+      - Label:
+          default: "Resource Tagging"
+        Parameters:
+          - TagProject
+          - TagOwner
+    ParameterLabels:
+      CertificateArn:
+        default: "SSL Certificate ARN"
+      GrafanaDomainName:
+        default: "Grafana Domain Name"
+      PublicRouteCidr:
+        default: "Public Route CIDR"
+      AzureClientId:
+        default: "Azure AD Client ID"
+      AzureClientSecret:
+        default: "Azure AD Client Secret"
+      AzureTenantId:
+        default: "Azure AD Tenant ID"
+      GrafanaAdminPassword:
+        default: "Grafana Admin Password"
+      PostgresAdminPassword:
+        default: "PostgreSQL Admin Password"
+      PgAdminEmail:
+        default: "pgAdmin Email Address"
+      PgAdminPassword:
+        default: "pgAdmin Password"
+      StorageType:
+        default: "Storage Backend Type"
+      AutoscalerType:
+        default: "Cluster Autoscaler Type"
+      TagProject:
+        default: "Project Tag"
+      TagOwner:
+        default: "Owner Tag"
 
 Parameters:
+  # Network & Security Configuration
   CertificateArn:
     Type: String
-    Description: ARN of the SSL certificate in ACM for grafana
+    Description: ARN of the SSL certificate in ACM for HTTPS access
+    AllowedPattern: "arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/[a-f0-9-]+"
+    ConstraintDescription: Must be a valid ACM certificate ARN
 
   GrafanaDomainName:
     Type: String
-    Description: Domain name for Grafana access
+    Description: Fully qualified domain name for Grafana access
+    AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?\.[a-zA-Z]{2,}$"
+    ConstraintDescription: Must be a valid domain name
 
+  PublicRouteCidr:
+    Type: String
+    Description: CIDR block for public internet access (required for ALB and NAT gateway)
+    Default: "0.0.0.0/0"
+    AllowedPattern: "^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    ConstraintDescription: Must be a valid CIDR block
+
+  # Azure AD Integration
   AzureClientId:
     Type: String
-    Description: Azure AD Application Client ID
+    Description: Azure AD Application Client ID for SSO integration
     NoEcho: true
+    AllowedPattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    ConstraintDescription: Must be a valid Azure AD Client ID (UUID format)
 
   AzureClientSecret:
     Type: String
     Description: Azure AD Application Client Secret
     NoEcho: true
+    MinLength: 1
+    MaxLength: 256
+    ConstraintDescription: Azure AD Client Secret is required
 
   AzureTenantId:
     Type: String
     Description: Azure AD Tenant ID
+    AllowedPattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    ConstraintDescription: Must be a valid Azure AD Tenant ID (UUID format)
 
+  # Application Credentials
   GrafanaAdminPassword:
     Type: String
-    Description: Admin password for Grafana
+    Description: Admin password for Grafana local authentication
     NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    ConstraintDescription: Password must be 8-128 characters long
 
   PostgresAdminPassword:
     Type: String
     Description: PostgreSQL admin user password
     NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    ConstraintDescription: Password must be 8-128 characters long
 
   PgAdminEmail:
     Type: String
-    Description: pgAdmin4 admin email
+    Description: Email address for pgAdmin4 administrator login
+    AllowedPattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    ConstraintDescription: Must be a valid email address
 
   PgAdminPassword:
     Type: String
-    Description: pgAdmin4 admin password
+    Description: Password for pgAdmin4 administrator
     NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    ConstraintDescription: Password must be 8-128 characters long
 
+  # Infrastructure Configuration
+  StorageType:
+    Type: String
+    Description: Storage backend for persistent volumes
+    Default: EFS
+    AllowedValues:
+      - EBS
+      - EFS
+    ConstraintDescription: Choose either EBS or EFS for storage
+
+  AutoscalerType:
+    Type: String
+    Description: Kubernetes cluster autoscaler implementation
+    Default: ClusterAutoscaler
+    AllowedValues:
+      - ClusterAutoscaler
+    ConstraintDescription: Currently only ClusterAutoscaler is supported
+
+  # Resource Tagging
   TagProject:
     Type: String
-    Description: Default Tag for project
+    Description: Project identifier for resource tagging
+    MinLength: 1
+    MaxLength: 256
+    ConstraintDescription: Project tag is required
 
   TagOwner:
     Type: String
-    Description: Default Tag for owner
+    Description: Owner identifier for resource tagging (email recommended)
+    MinLength: 1
+    MaxLength: 256
+    ConstraintDescription: Owner tag is required
 
-  PublicRouteCidr:
-    Type: String
-    Description: CIDR block for public route (use 0.0.0.0/0 for full internet access)
-    Default: "0.0.0.0/0"
+Conditions:
+  UseEBS: !Equals [!Ref StorageType, "EBS"]
+  UseEFS: !Equals [!Ref StorageType, "EFS"]
+  UseClusterAutoscaler: !Equals [!Ref AutoscalerType, "ClusterAutoscaler"]
 
 Resources:
   # VPC and Networking
@@ -266,6 +385,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
         - PolicyName: EKSPodIdentityAgentPolicy
           PolicyDocument:
@@ -280,6 +400,19 @@ Resources:
                   - eks:UpdatePodIdentityAssociation
                   - sts:AssumeRole
                   - sts:TagSession
+                Resource: '*'
+        - PolicyName: FluentBitCloudWatchPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
                 Resource: '*'
 
   ClusterAutoscalerPolicy:
@@ -582,6 +715,7 @@ Resources:
   # cluster-autoscaler is installed as part of drivers
   ClusterAutoscalerRole:
     Type: AWS::IAM::Role
+    Condition: UseClusterAutoscaler
     Properties:
       RoleName: !Sub "${AWS::StackName}-ClusterAutoscalerRole"
       AssumeRolePolicyDocument:
@@ -652,16 +786,124 @@ Resources:
                   - !Ref ALBDnsNameSecret
                   - !GetAtt SecretManagerKMSKey.Arn
 
+  # Velero Backup S3 Bucket
+  VeleroBackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-velero-backup-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Owner
+          Value: !Ref TagOwner
+
+  VeleroRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-VeleroRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: VeleroBackupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - ec2:CreateTags
+                  - ec2:CreateVolume
+                  - ec2:CreateSnapshot
+                  - ec2:DeleteSnapshot
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub "${VeleroBackupBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt VeleroBackupBucket.Arn
+
+  CloudWatchObservabilityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-CloudWatchObservabilityRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+
+  FluentBitRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-FluentBitRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: FluentBitCloudWatchPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                Resource: '*'
+
   # EKS Addons to be installed by default
   EKSPodIdentityAgentAddon:
     Type: AWS::EKS::Addon
     Properties:
       ClusterName: !Ref EKSCluster
       AddonName: eks-pod-identity-agent
-      AddonVersion: v1.3.10-eksbuild.1
+      AddonVersion: v1.3.10-eksbuild.2
 
   EKSEBSAddon:
     Type: AWS::EKS::Addon
+    Condition: UseEBS
     DependsOn: EKSPodIdentityAgentAddon
     Properties:
       ClusterName: !Ref EKSCluster
@@ -677,13 +919,14 @@ Resources:
     Properties:
       ClusterName: !Ref EKSCluster
       AddonName: vpc-cni
-      AddonVersion: v1.20.5-eksbuild.1
+      AddonVersion: v1.21.1-eksbuild.1
       PodIdentityAssociations:
         - RoleArn: !GetAtt VPCCNIRole.Arn
           ServiceAccount: aws-node
 
   EKSEFSAddon:
     Type: AWS::EKS::Addon
+    Condition: UseEFS
     DependsOn: EKSPodIdentityAgentAddon
     Properties:
       ClusterName: !Ref EKSCluster
@@ -705,10 +948,22 @@ Resources:
     Properties:
       ClusterName: !Ref EKSCluster
       AddonName: metrics-server
-      AddonVersion: v0.8.0-eksbuild.5
+      AddonVersion: v0.8.0-eksbuild.6
+
+  EKSCloudWatchObservabilityAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSPodIdentityAgentAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: amazon-cloudwatch-observability
+      AddonVersion: v4.8.0-eksbuild.1
+      PodIdentityAssociations:
+        - RoleArn: !GetAtt CloudWatchObservabilityRole.Arn
+          ServiceAccount: cloudwatch-agent
   
   EKSNodeGroup:
     Type: AWS::EKS::Nodegroup
+    Condition: UseClusterAutoscaler
     Properties:
       ClusterName: !Ref EKSCluster
       NodegroupName: !Sub "${AWS::StackName}-nodegroup"
@@ -749,6 +1004,7 @@ Resources:
   # EFS for persistent storage
   EFSFileSystem:
     Type: AWS::EFS::FileSystem
+    Condition: UseEFS
     Properties:
       Encrypted: true
       PerformanceMode: generalPurpose
@@ -760,6 +1016,7 @@ Resources:
 
   EFSMountTarget1:
     Type: AWS::EFS::MountTarget
+    Condition: UseEFS
     Properties:
       FileSystemId: !Ref EFSFileSystem
       SubnetId: !Ref PrivateSubnet1
@@ -768,6 +1025,7 @@ Resources:
 
   EFSMountTarget2:
     Type: AWS::EFS::MountTarget
+    Condition: UseEFS
     Properties:
       FileSystemId: !Ref EFSFileSystem
       SubnetId: !Ref PrivateSubnet2
@@ -776,6 +1034,7 @@ Resources:
 
   EFSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: UseEFS
     Properties:
       GroupDescription: EFS Security Group
       VpcId: !Ref VPC
@@ -889,6 +1148,7 @@ Outputs:
 
   ClusterAutoscalerRoleArn:
     Description: Cluster Autoscaler IAM Role ARN
+    Condition: UseClusterAutoscaler
     Value: !GetAtt ClusterAutoscalerRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-ClusterAutoscalerRoleArn"
@@ -913,6 +1173,7 @@ Outputs:
 
   EFSFileSystemId:
     Description: EFS File System ID
+    Condition: UseEFS
     Value: !Ref EFSFileSystem
     Export:
       Name: !Sub "${AWS::StackName}-EFSFileSystemId"
@@ -934,3 +1195,27 @@ Outputs:
     Value: !Ref PrivateSubnet2
     Export:
       Name: !Sub "${AWS::StackName}-PrivateSubnet2"
+
+  VeleroBackupBucket:
+    Description: Velero Backup S3 Bucket Name
+    Value: !Ref VeleroBackupBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-VeleroBackupBucket"
+
+  VeleroRoleArn:
+    Description: Velero IAM Role ARN
+    Value: !GetAtt VeleroRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-VeleroRoleArn"
+
+  CloudWatchObservabilityRoleArn:
+    Description: CloudWatch Observability IAM Role ARN
+    Value: !GetAtt CloudWatchObservabilityRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudWatchObservabilityRoleArn"
+
+  FluentBitRoleArn:
+    Description: Fluent Bit IAM Role ARN
+    Value: !GetAtt FluentBitRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FluentBitRoleArn"

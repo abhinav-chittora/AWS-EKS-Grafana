@@ -4,14 +4,20 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: grafana-stack
+  labels:
+    name: grafana-stack
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: postgres-stack
+  labels:
+    name: postgres-stack
 ---
 # PgAdmin Namespace (COMMENTED - Not deployed)
 # apiVersion: v1
 # kind: Namespace
 # metadata:
 #   name: pgadmin-stack
+#   labels:
+#     name: pgadmin-stack

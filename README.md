@@ -76,7 +76,7 @@ STACK_NAME=my-stack AWS_REGION=us-east-1 make deploy-eks
 ```
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | STACK_NAME | grafana-eks | CloudFormation stack name |
 | AWS_REGION | eu-central-1 | AWS region |
 | AWS_PROFILE | ecs-test | AWS CLI profile |
@@ -84,19 +84,36 @@ STACK_NAME=my-stack AWS_REGION=us-east-1 make deploy-eks
 
 ### CloudFormation Parameters
 
-Required parameters in `parameters.json`:
+Parameters are organized into logical groups for better readability:
 
-- **CertificateArn**: ACM certificate ARN for HTTPS
-- **GrafanaDomainName**: Domain for Grafana access
-- **AzureClientId**: Azure AD application client ID
+#### Network & Security Configuration
+
+- **CertificateArn**: ACM certificate ARN for HTTPS (must be valid ACM ARN format)
+- **GrafanaDomainName**: Domain for Grafana access (must be valid FQDN)
+- **PublicRouteCidr**: CIDR for public internet access (default: 0.0.0.0/0)
+
+#### Azure AD Integration
+
+- **AzureClientId**: Azure AD application client ID (UUID format)
 - **AzureClientSecret**: Azure AD application secret
-- **AzureTenantId**: Azure AD tenant ID
-- **GrafanaAdminPassword**: Grafana admin password
-- **PostgresAdminPassword**: PostgreSQL admin password
-- **PgAdminEmail**: pgAdmin login email
-- **PgAdminPassword**: pgAdmin password
+- **AzureTenantId**: Azure AD tenant ID (UUID format)
+
+#### Application Credentials
+
+- **GrafanaAdminPassword**: Grafana admin password (8-128 chars)
+- **PostgresAdminPassword**: PostgreSQL admin password (8-128 chars)
+- **PgAdminEmail**: pgAdmin login email (valid email format)
+- **PgAdminPassword**: pgAdmin password (8-128 chars)
+
+#### Infrastructure Configuration
+
+- **StorageType**: Storage backend (EBS or EFS, default: EFS)
+- **AutoscalerType**: Autoscaler type (default: ClusterAutoscaler)
+
+#### Resource Tagging
+
 - **TagProject**: Project tag value
-- **TagOwner**: Owner tag value
+- **TagOwner**: Owner tag value (email recommended)
 
 ## Components
 
@@ -275,7 +292,7 @@ graph LR
 ├── .gitignore                          # Git ignore rules
 ├── Makefile                            # Deployment automation
 ├── grafana-eks.yaml                    # CloudFormation template
-├── parameters_template.json            # CloudFormation parameters template
+├── parameters.json                     # CloudFormation parameters file
 ├── chittora-access.yaml               # EKS Access Entry for restricted users
 ├── eks-admin-role.yaml                # Dedicated EKS admin role
 └── k8s-manifests/                      # Kubernetes manifests directory

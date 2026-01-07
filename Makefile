@@ -46,7 +46,9 @@ update-eks:
 	aws eks update-kubeconfig --alias grafana-eks --region $(AWS_REGION) --name $(CLUSTER_NAME) --profile $(AWS_PROFILE)
 	@echo "Restarting CNI pods to apply new configuration..."
 	kubectl delete pods -n kube-system -l k8s-app=aws-node
-	kubectl wait --for=condition=ready --timeout=300s pod -l k8s-app=aws-node -n kube-system
+	@echo "Waiting for new CNI pods to start..."
+	sleep 10
+	kubectl wait --for=condition=ready --timeout=300s pod -l k8s-app=aws-node -n kube-system || true
 	
 install-drivers:
 	@echo "Associating OIDC provider with cluster"
@@ -54,8 +56,6 @@ install-drivers:
 		--cluster=$(CLUSTER_NAME) \
 		--region=$(AWS_REGION) \
 		--approve || true
-	@echo "Get OIDC Provider..."
-	$(eval OIDC_PROVIDER := $(shell aws eks describe-cluster --name $(CLUSTER_NAME) --query 'cluster.identity.oidc.issuer' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	@echo "Installing AWS Load Balancer Controller..."
 	$(eval LB_POLICY_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerControllerPolicyArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
 	AWS_PROFILE=$(AWS_PROFILE) eksctl create iamserviceaccount \
@@ -74,43 +74,123 @@ install-drivers:
 		--set clusterName=$(CLUSTER_NAME) \
 		--set serviceAccount.create=false \
 		--set serviceAccount.name=aws-load-balancer-controller
-	@echo "Waiting for AWS Load Balancer Controller to be ready..."
-	kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n kube-system
-	kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=aws-load-balancer-controller -n kube-system
-	@echo "Waiting 30 seconds for webhook to fully initialize..."
-	sleep 30
 	@echo "Installing Cluster Autoscaler..."
-	$(eval CA_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`ClusterAutoscalerRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
-	@echo "Creating Pod Identity Association for Cluster Autoscaler..."
-	aws eks create-pod-identity-association \
-		--cluster-name $(CLUSTER_NAME) \
-		--namespace kube-system \
-		--service-account cluster-autoscaler-aws-cluster-autoscaler \
-		--role-arn $(CA_ROLE_ARN) \
-		--region $(AWS_REGION) \
-		--profile $(AWS_PROFILE) || true
+	$(eval CLUSTER_AUTOSCALER_POLICY_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`ClusterAutoscalerPolicyArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	AWS_PROFILE=$(AWS_PROFILE) eksctl create iamserviceaccount \
+		--cluster=$(CLUSTER_NAME) \
+		--namespace=kube-system \
+		--name=cluster-autoscaler \
+		--role-name AmazonEKSClusterAutoscalerRole \
+		--attach-policy-arn=$(CLUSTER_AUTOSCALER_POLICY_ARN) \
+		--approve \
+		--region=$(AWS_REGION)
 	helm repo add autoscaler https://kubernetes.github.io/autoscaler
 	helm repo update
 	helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \
 		--namespace kube-system \
-		--version=9.52.1 \
+		--version=9.43.2 \
 		--set autoDiscovery.clusterName=$(CLUSTER_NAME) \
 		--set awsRegion=$(AWS_REGION) \
-		--set serviceAccount.create=true \
-		--set serviceAccount.name=cluster-autoscaler-aws-cluster-autoscaler \
-		--set extraArgs.skip-nodes-with-local-storage=false \
-		--set extraArgs.skip-nodes-with-system-pods=false
+		--set serviceAccount.create=false \
+		--set serviceAccount.name=cluster-autoscaler
 	@echo "Installing Secrets Store CSI Driver..."
 	helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
 	helm repo update
 	helm upgrade --install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver \
 		--namespace kube-system \
-		--version=1.5.4
+		--version=1.5.5 \
 		--set syncSecret.enabled=true \
 		--set enableSecretRotation=true \
-		--set rotationPollInterval=15s 
+		--set rotationPollInterval=15s
 	kubectl apply -f https://raw.githubusercontent.com/aws/secrets-store-csi-driver-provider-aws/main/deployment/aws-provider-installer.yaml
 	kubectl patch daemonset csi-secrets-store-provider-aws -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/automountServiceAccountToken", "value":true}]'
+
+install-istio:
+	@echo "Installing Istio..."
+	curl -L https://istio.io/downloadIstio | sh -
+	$(eval ISTIO_VERSION := $(shell ls | grep istio- | head -1))
+	export PATH=$$PWD/$(ISTIO_VERSION)/bin:$$PATH && istioctl install --set values.defaultRevision=default -y
+	@echo "Enabling Istio injection for application namespaces..."
+	kubectl label namespace grafana-stack istio-injection=enabled --overwrite
+	kubectl label namespace postgres-stack istio-injection=enabled --overwrite
+	@echo "Installing Istio addons..."
+	kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/prometheus.yaml
+	kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/grafana.yaml
+	kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/jaeger.yaml
+	kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/kiali.yaml
+	@echo "Waiting for Istio components to be ready..."
+	kubectl wait --for=condition=available --timeout=300s deployment/istiod -n istio-system
+
+install-velero:
+	@echo "Installing Velero..."
+	$(eval VELERO_BUCKET := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`VeleroBackupBucket`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	$(eval VELERO_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`VeleroRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	@echo "Creating Pod Identity Association for Velero..."
+	aws eks create-pod-identity-association \
+		--cluster-name $(CLUSTER_NAME) \
+		--namespace velero \
+		--service-account velero \
+		--role-arn $(VELERO_ROLE_ARN) \
+		--region $(AWS_REGION) \
+		--profile $(AWS_PROFILE) || true
+	helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+	helm repo update
+	helm upgrade --install velero vmware-tanzu/velero \
+		--namespace velero \
+		--create-namespace \
+		--version=7.2.1 \
+		--set configuration.backupStorageLocation[0].name=default \
+		--set configuration.backupStorageLocation[0].provider=aws \
+		--set configuration.backupStorageLocation[0].bucket=$(VELERO_BUCKET) \
+		--set configuration.backupStorageLocation[0].config.region=$(AWS_REGION) \
+		--set configuration.volumeSnapshotLocation[0].name=default \
+		--set configuration.volumeSnapshotLocation[0].provider=aws \
+		--set configuration.volumeSnapshotLocation[0].config.region=$(AWS_REGION) \
+		--set serviceAccount.server.create=true \
+		--set serviceAccount.server.name=velero \
+		--set kubectl.image.tag=1.34 \
+		--set initContainers[0].name=velero-plugin-for-aws \
+		--set initContainers[0].image=velero/velero-plugin-for-aws:v1.11.0 \
+		--set initContainers[0].volumeMounts[0].mountPath=/target \
+		--set initContainers[0].volumeMounts[0].name=plugins
+	@echo "Waiting for Velero to be ready..."
+	kubectl wait --for=condition=available --timeout=300s deployment/velero -n velero
+
+install-fluent-bit:
+	@echo "Installing AWS for Fluent Bit..."
+	$(eval FLUENT_BIT_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`FluentBitRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
+	@echo "Creating Pod Identity Association for Fluent Bit..."
+	aws eks create-pod-identity-association \
+		--cluster-name $(CLUSTER_NAME) \
+		--namespace amazon-cloudwatch \
+		--service-account fluent-bit \
+		--role-arn $(FLUENT_BIT_ROLE_ARN) \
+		--region $(AWS_REGION) \
+		--profile $(AWS_PROFILE) || true
+	helm repo add eks https://aws.github.io/eks-charts
+	helm repo update
+	helm upgrade --install aws-for-fluent-bit eks/aws-for-fluent-bit \
+		--namespace amazon-cloudwatch \
+		--create-namespace \
+		--version=0.1.34 \
+		--set cloudWatchLogs.enabled=true \
+		--set cloudWatchLogs.region=$(AWS_REGION) \
+		--set cloudWatchLogs.logGroupName=/aws/containerinsights/$(CLUSTER_NAME)/application \
+		--set firehose.enabled=false \
+		--set kinesis.enabled=false \
+		--set elasticsearch.enabled=false \
+		--set serviceAccount.create=true \
+		--set resources.limits.memory=50Mi \
+		--set resources.requests.memory=25Mi \
+		--set serviceAccount.name=fluent-bit
+		--set kinesis.enabled=false \
+		--set elasticsearch.enabled=false \
+		--set serviceAccount.create=true \
+		--set resources.limits.memory=50Mi \
+		--set resources.requests.memory=25Mi \
+		--set serviceAccount.name=fluent-bit
+	@echo "Waiting for Fluent Bit to be ready..."
+	kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=aws-for-fluent-bit -n amazon-cloudwatch
 
 
 
@@ -135,7 +215,6 @@ deploy-k8s:
 	kubectl annotate serviceaccount -n postgres-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
 	kubectl wait --for=condition=available --timeout=300s deployment/grafana -n grafana-stack
 #	kubectl annotate serviceaccount -n pgadmin-stack secrets-store-sa eks.amazonaws.com/role-arn=$(SM_ROLE_ARN) --overwrite
-
 update-k8s:
 	@echo "Fetching CloudFormation outputs..."
 	$(eval SM_ROLE_ARN := $(shell aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query 'Stacks[0].Outputs[?OutputKey==`SecretsManagerRoleArn`].OutputValue' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)))
@@ -182,6 +261,36 @@ delete-drivers:
 		--cluster $(CLUSTER_NAME) \
 		--region $(AWS_REGION) || true
 
+delete-istio:
+	@echo "Removing Istio injection labels..."
+	kubectl label namespace grafana-stack istio-injection- || true
+	kubectl label namespace postgres-stack istio-injection- || true
+	@echo "Deleting Istio addons..."
+	kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/kiali.yaml || true
+	kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/jaeger.yaml || true
+	kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/grafana.yaml || true
+	kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/prometheus.yaml || true
+	@echo "Uninstalling Istio..."
+	$(eval ISTIO_VERSION := $(shell ls | grep istio- | head -1))
+	export PATH=$$PWD/$(ISTIO_VERSION)/bin:$$PATH && istioctl uninstall --purge -y || true
+	kubectl delete namespace istio-system || true
+
+delete-velero:
+	@echo "Deleting Pod Identity Association for Velero..."
+	aws eks delete-pod-identity-association \
+		--cluster-name $(CLUSTER_NAME) \
+		--association-id $(shell aws eks list-pod-identity-associations --cluster-name $(CLUSTER_NAME) --service-account velero --namespace velero --query 'associations[0].associationId' --output text --region $(AWS_REGION) --profile $(AWS_PROFILE)) \
+		--region $(AWS_REGION) \
+		--profile $(AWS_PROFILE) || true
+	@echo "Uninstalling Velero..."
+	helm uninstall velero -n velero || true
+	kubectl delete namespace velero || true
+
+delete-fluent-bit:
+	@echo "Uninstalling Fluent Bit..."
+	helm uninstall aws-for-fluent-bit -n amazon-cloudwatch || true
+	kubectl delete namespace amazon-cloudwatch || true
+
 delete-k8s:
 	@echo "Deleting manifests..."
 	kubectl delete -f k8s-manifests/ --ignore-not-found=true 2>/dev/null || true
@@ -225,11 +334,13 @@ update: update-eks install-drivers update-k8s
 	@echo "Updatd EKS Cluster..."
 
 # Full deployment workflow
-deploy: deploy-eks install-drivers deploy-k8s
+deploy: deploy-eks install-drivers install-velero deploy-k8s
 	@echo "EKS deployment complete!"
 	@echo "Access Grafana at: https://grafana.hws-gruppe.de"
 	@echo "Access pgAdmin at: https://pgadmin.hws-gruppe.de"
+	@echo "Access Kiali at: kubectl port-forward svc/kiali 20001:20001 -n istio-system"
+	@echo "Create backup with: velero backup create my-backup --include-namespaces grafana-stack,postgres-stack"
 
 # Full cleanup workflow
-clean: delete-k8s delete-drivers delete-eks
+clean: delete-k8s delete-fluent-bit delete-velero delete-istio delete-drivers delete-eks
 	@echo "EKS cleanup complete!"
